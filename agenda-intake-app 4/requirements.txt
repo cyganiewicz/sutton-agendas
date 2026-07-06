@@ -1,0 +1,6 @@
+Flask==3.0.3
+pypdf==6.13.1
+reportlab==4.5.1
+gunicorn==22.0.0
+python-dotenv==1.0.1
+resend==2.32.2
