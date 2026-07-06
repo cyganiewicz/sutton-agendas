@@ -4,7 +4,7 @@ import shutil
 import uuid
 
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, redirect, url_for, flash
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
 
 load_dotenv()
 
@@ -69,22 +69,34 @@ def submit():
     embed = request.form.get("embed") == "1"
     redirect_target = "embed" if embed else "index"
 
+    # The form is submitted via JavaScript (fetch), which marks the request
+    # with this header. That path returns JSON so the page can show the
+    # result directly, without depending on a cookie surviving a redirect --
+    # which cross-origin iframes on the town website can't rely on in every
+    # browser (see the SESSION_COOKIE_SAMESITE note above). If JavaScript is
+    # unavailable for some reason, the plain form still POSTs here without
+    # the header, and gets the classic flash-then-redirect behavior instead.
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest"
+
+    def respond(success: bool, message: str):
+        if wants_json:
+            return jsonify({"success": success, "message": message})
+        flash(message, "success" if success else "error")
+        return redirect(url_for(redirect_target))
+
     submitter_name = (request.form.get("submitter_name") or "").strip()
     submitter_email = (request.form.get("submitter_email") or "").strip()
     body_name = (request.form.get("body_name") or "").strip()
     uploaded_file = request.files.get("agenda_file")
 
     if not submitter_name or not submitter_email or not body_name:
-        flash("Please fill in your name, email, and the board/committee name.", "error")
-        return redirect(url_for(redirect_target))
+        return respond(False, "Please fill in your name, email, and the board/committee name.")
 
     if not uploaded_file or uploaded_file.filename == "":
-        flash("Please choose a Word (.doc/.docx) or PDF file to upload.", "error")
-        return redirect(url_for(redirect_target))
+        return respond(False, "Please choose a Word (.doc/.docx) or PDF file to upload.")
 
     if not is_allowed_file(uploaded_file.filename):
-        flash("Only .pdf, .doc, and .docx files are accepted.", "error")
-        return redirect(url_for(redirect_target))
+        return respond(False, "Only .pdf, .doc, and .docx files are accepted.")
 
     work_dir = make_temp_workdir()
     submission_id = uuid.uuid4().hex[:8]
@@ -99,8 +111,7 @@ def submit():
                 converted_pdf_path = convert_to_pdf(input_path, work_dir)
             except ConversionError as e:
                 logger.exception("[%s] Conversion failed", submission_id)
-                flash(f"Could not convert your document: {e}", "error")
-                return redirect(url_for(redirect_target))
+                return respond(False, f"Could not convert your document: {e}")
 
             stamped_path = os.path.join(work_dir, "stamped.pdf")
             try:
@@ -109,8 +120,7 @@ def submit():
                 )
             except Exception as e:
                 logger.exception("[%s] Stamping failed", submission_id)
-                flash(f"Could not stamp your document: {e}", "error")
-                return redirect(url_for(redirect_target))
+                return respond(False, f"Could not stamp your document: {e}")
 
             received_str = received_dt.strftime("%m/%d/%Y at %I:%M %p %Z").replace(" 0", " ")
 
@@ -125,19 +135,17 @@ def submit():
                 )
             except MailError as e:
                 logger.exception("[%s] Email send failed", submission_id)
-                flash(
+                return respond(
+                    False,
                     "Your document was processed but could not be emailed to the "
                     f"Clerk's office. Please contact them directly. ({e})",
-                    "error",
                 )
-                return redirect(url_for(redirect_target))
 
-            flash(
+            return respond(
+                True,
                 f"Success! Your agenda was received {received_str} and sent to the "
                 "Clerk's office for posting.",
-                "success",
             )
-            return redirect(url_for(redirect_target))
 
         except Exception as e:
             # Safety net: any unexpected failure (not one of the specific
@@ -146,20 +154,30 @@ def submit():
             # submission id.
             logger.exception("[%s] Unexpected error processing submission", submission_id)
             try:
-                flash(
+                return respond(
+                    False,
                     "Something went wrong processing your submission (reference "
                     f"{submission_id}). Please try again, or contact the Clerk's "
                     "office directly if it keeps happening.",
-                    "error",
                 )
             except Exception:
-                # If flash() itself can't run (e.g. misconfigured secret key),
-                # don't let that turn into a second unhandled crash -- just
-                # log it and still redirect the user to a normal page.
+                # If even building the response fails (e.g. misconfigured
+                # secret key breaking flash() on the no-JS path), fall back
+                # to the simplest possible reply instead of a second crash.
                 logger.exception(
-                    "[%s] Could not flash the error message either", submission_id
+                    "[%s] Could not build the error response either", submission_id
                 )
-            return redirect(url_for(redirect_target))
+                if wants_json:
+                    return jsonify(
+                        {
+                            "success": False,
+                            "message": (
+                                "Something went wrong processing your submission "
+                                f"(reference {submission_id})."
+                            ),
+                        }
+                    )
+                return redirect(url_for(redirect_target))
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
