@@ -21,9 +21,12 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
 MAX_CONTENT_LENGTH = int(os.environ.get("MAX_UPLOAD_MB", "25")) * 1024 * 1024
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
-STAMP_TEXT = os.environ.get(
-    "STAMP_TEXT", "Received by Town of Sutton Clerk's Office"
-)
+# Use `or` rather than os.environ.get's default parameter: if STAMP_TEXT is
+# set in the hosting platform but left blank (present with an empty value,
+# rather than not set at all), .get()'s default would never kick in and the
+# stamp would silently render with no label text. `or` treats blank the same
+# as unset.
+STAMP_TEXT = os.environ.get("STAMP_TEXT") or "Received by Town of Sutton Clerk's Office"
 
 
 @app.route("/", methods=["GET"])
@@ -61,55 +64,71 @@ def submit():
         return redirect(url_for(redirect_target))
 
     work_dir = make_temp_workdir()
+    submission_id = uuid.uuid4().hex[:8]
     try:
-        original_filename = uploaded_file.filename
-        safe_name = f"{uuid.uuid4().hex}_{os.path.basename(original_filename)}"
-        input_path = os.path.join(work_dir, safe_name)
-        uploaded_file.save(input_path)
-
         try:
-            converted_pdf_path = convert_to_pdf(input_path, work_dir)
-        except ConversionError as e:
-            logger.exception("Conversion failed")
-            flash(f"Could not convert your document: {e}", "error")
-            return redirect(url_for(redirect_target))
+            original_filename = uploaded_file.filename
+            safe_name = f"{uuid.uuid4().hex}_{os.path.basename(original_filename)}"
+            input_path = os.path.join(work_dir, safe_name)
+            uploaded_file.save(input_path)
 
-        stamped_path = os.path.join(work_dir, "stamped.pdf")
-        try:
-            received_dt = stamp_pdf(
-                converted_pdf_path, stamped_path, stamp_text=STAMP_TEXT
-            )
-        except Exception as e:
-            logger.exception("Stamping failed")
-            flash(f"Could not stamp your document: {e}", "error")
-            return redirect(url_for(redirect_target))
+            try:
+                converted_pdf_path = convert_to_pdf(input_path, work_dir)
+            except ConversionError as e:
+                logger.exception("[%s] Conversion failed", submission_id)
+                flash(f"Could not convert your document: {e}", "error")
+                return redirect(url_for(redirect_target))
 
-        received_str = received_dt.strftime("%m/%d/%Y at %I:%M %p %Z").replace(" 0", " ")
+            stamped_path = os.path.join(work_dir, "stamped.pdf")
+            try:
+                received_dt = stamp_pdf(
+                    converted_pdf_path, stamped_path, stamp_text=STAMP_TEXT
+                )
+            except Exception as e:
+                logger.exception("[%s] Stamping failed", submission_id)
+                flash(f"Could not stamp your document: {e}", "error")
+                return redirect(url_for(redirect_target))
 
-        try:
-            send_agenda_email(
-                pdf_path=stamped_path,
-                original_filename=original_filename,
-                submitter_name=submitter_name,
-                submitter_email=submitter_email,
-                body_name=body_name,
-                received_str=received_str,
-            )
-        except MailError as e:
-            logger.exception("Email send failed")
+            received_str = received_dt.strftime("%m/%d/%Y at %I:%M %p %Z").replace(" 0", " ")
+
+            try:
+                send_agenda_email(
+                    pdf_path=stamped_path,
+                    original_filename=original_filename,
+                    submitter_name=submitter_name,
+                    submitter_email=submitter_email,
+                    body_name=body_name,
+                    received_str=received_str,
+                )
+            except MailError as e:
+                logger.exception("[%s] Email send failed", submission_id)
+                flash(
+                    "Your document was processed but could not be emailed to the "
+                    f"Clerk's office. Please contact them directly. ({e})",
+                    "error",
+                )
+                return redirect(url_for(redirect_target))
+
             flash(
-                "Your document was processed but could not be emailed to the "
-                f"Clerk's office. Please contact them directly. ({e})",
+                f"Success! Your agenda was received {received_str} and sent to the "
+                "Clerk's office for posting.",
+                "success",
+            )
+            return redirect(url_for(redirect_target))
+
+        except Exception as e:
+            # Safety net: any unexpected failure (not one of the specific
+            # cases above) should still show the user a normal page instead
+            # of a raw 500, and should be easy to find in the logs by its
+            # submission id.
+            logger.exception("[%s] Unexpected error processing submission", submission_id)
+            flash(
+                "Something went wrong processing your submission (reference "
+                f"{submission_id}). Please try again, or contact the Clerk's "
+                "office directly if it keeps happening.",
                 "error",
             )
             return redirect(url_for(redirect_target))
-
-        flash(
-            f"Success! Your agenda was received {received_str} and sent to the "
-            "Clerk's office for posting.",
-            "success",
-        )
-        return redirect(url_for(redirect_target))
 
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
