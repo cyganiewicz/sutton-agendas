@@ -17,6 +17,20 @@ EASTERN = ZoneInfo("America/New_York")
 
 STAMP_TEXT_LINE1 = "Received by Town of Sutton Clerk's Office"
 
+# Dark red ("firebrick"-family), evocative of a traditional ink "received"
+# stamp. Against a white fill this gives a contrast ratio of roughly 10:1,
+# well above the 4.5:1 WCAG AA minimum for normal-size text (and above the
+# 7:1 AAA threshold), so it stays readable for low-vision users while still
+# reading as a clearly distinct, noticeable color rather than plain black.
+STAMP_COLOR = (0.545, 0.0, 0.0)  # #8B0000
+
+FONT_BOLD = "Helvetica-Bold"
+FONT_REGULAR = "Helvetica"
+FONT_SIZE = 8
+PADDING_X = 6
+PADDING_Y = 5
+LINE_GAP = 3
+
 
 def _format_timestamp(dt: datetime) -> str:
     # Example: "07/06/2026 at 2:41 PM EDT"
@@ -32,22 +46,34 @@ def _make_stamp_overlay(page_width: float, page_height: float, received_dt: date
     line1 = stamp_text
     line2 = _format_timestamp(received_dt)
 
+    # Size the box to fit the actual text instead of a fixed guess, so it
+    # stays compact regardless of how long the stamp text or timestamp is.
+    text_width = max(
+        c.stringWidth(line1, FONT_BOLD, FONT_SIZE),
+        c.stringWidth(line2, FONT_REGULAR, FONT_SIZE),
+    )
+    box_width = text_width + (PADDING_X * 2)
+    box_height = (FONT_SIZE * 2) + LINE_GAP + (PADDING_Y * 2)
+
     margin = 18
-    box_width = 260
-    box_height = 34
     x = page_width - box_width - margin
     y = page_height - box_height - margin
 
-    # Light background box with border so the stamp is legible over any content.
+    # White fill keeps the box legible over any underlying content; the
+    # colored border and text are what make it noticeable.
     c.setFillColorRGB(1, 1, 1)
-    c.setStrokeColorRGB(0, 0, 0)
+    c.setStrokeColorRGB(*STAMP_COLOR)
+    c.setLineWidth(1.25)
     c.roundRect(x, y, box_width, box_height, 4, fill=1, stroke=1)
 
-    c.setFillColorRGB(0, 0, 0)
-    c.setFont("Helvetica-Bold", 8)
-    c.drawString(x + 8, y + box_height - 13, line1)
-    c.setFont("Helvetica", 8)
-    c.drawString(x + 8, y + box_height - 25, line2)
+    line1_baseline = y + box_height - PADDING_Y - FONT_SIZE
+    line2_baseline = line1_baseline - LINE_GAP - FONT_SIZE
+
+    c.setFillColorRGB(*STAMP_COLOR)
+    c.setFont(FONT_BOLD, FONT_SIZE)
+    c.drawString(x + PADDING_X, line1_baseline, line1)
+    c.setFont(FONT_REGULAR, FONT_SIZE)
+    c.drawString(x + PADDING_X, line2_baseline, line2)
 
     c.showPage()
     c.save()
