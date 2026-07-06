@@ -16,7 +16,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agenda-intake")
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-secret-change-me")
+# `or`, not .get()'s default: a FLASK_SECRET_KEY that's set-but-empty in the
+# hosting platform is falsy, and Flask treats a falsy secret_key as "no key
+# set" -- flash() then raises RuntimeError on every request. `or` catches
+# that case the same way it does for STAMP_TEXT below.
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "dev-secret-change-me"
 
 MAX_CONTENT_LENGTH = int(os.environ.get("MAX_UPLOAD_MB", "25")) * 1024 * 1024
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
@@ -122,12 +126,20 @@ def submit():
             # of a raw 500, and should be easy to find in the logs by its
             # submission id.
             logger.exception("[%s] Unexpected error processing submission", submission_id)
-            flash(
-                "Something went wrong processing your submission (reference "
-                f"{submission_id}). Please try again, or contact the Clerk's "
-                "office directly if it keeps happening.",
-                "error",
-            )
+            try:
+                flash(
+                    "Something went wrong processing your submission (reference "
+                    f"{submission_id}). Please try again, or contact the Clerk's "
+                    "office directly if it keeps happening.",
+                    "error",
+                )
+            except Exception:
+                # If flash() itself can't run (e.g. misconfigured secret key),
+                # don't let that turn into a second unhandled crash -- just
+                # log it and still redirect the user to a normal page.
+                logger.exception(
+                    "[%s] Could not flash the error message either", submission_id
+                )
             return redirect(url_for(redirect_target))
 
     finally:
