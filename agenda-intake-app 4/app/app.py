@@ -22,6 +22,25 @@ app = Flask(__name__)
 # that case the same way it does for STAMP_TEXT below.
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or "dev-secret-change-me"
 
+# The form is designed to be embedded in an <iframe> on the town website,
+# which is a different domain than wherever this app is hosted. Flask's
+# session cookie (which is what makes flash() messages survive the redirect
+# after submit) defaults to a SameSite setting that browsers block inside
+# cross-origin iframes -- so on the embedded page, the success/error message
+# would silently vanish after submit while still working fine standalone.
+# SameSite=None (plus Secure, required by browsers whenever SameSite=None is
+# used) tells the browser this cookie is intentionally meant to work in that
+# cross-site iframe context.
+app.config["SESSION_COOKIE_SAMESITE"] = "None"
+# Secure is required by browsers whenever SameSite=None is used, and Railway
+# always serves over HTTPS, so this should stay True in production. It's
+# environment-controlled only so local testing over plain http://localhost
+# (no TLS) can still see flash messages by setting SESSION_COOKIE_SECURE=false
+# in a local .env -- see .env.example.
+app.config["SESSION_COOKIE_SECURE"] = (
+    os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() != "false"
+)
+
 MAX_CONTENT_LENGTH = int(os.environ.get("MAX_UPLOAD_MB", "25")) * 1024 * 1024
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 
