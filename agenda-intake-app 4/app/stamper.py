@@ -88,9 +88,10 @@ def stamp_pdf(
     stamp_text: str = STAMP_TEXT_LINE1,
 ) -> datetime:
     """
-    Stamps every page of input_pdf_path and writes the result to output_pdf_path.
-    Returns the timestamp (Eastern time) that was used, so the caller can
-    reference it (e.g., in an email subject line).
+    Stamps only the first page of input_pdf_path (the standard place a
+    "received" stamp goes on a multi-page document) and writes the result to
+    output_pdf_path. Returns the timestamp (Eastern time) that was used, so
+    the caller can reference it (e.g., in an email subject line).
     """
     if received_dt is None:
         received_dt = datetime.now(EASTERN)
@@ -100,11 +101,12 @@ def stamp_pdf(
     reader = PdfReader(input_pdf_path)
     writer = PdfWriter()
 
-    for page in reader.pages:
-        width = float(page.mediabox.width)
-        height = float(page.mediabox.height)
-        overlay_reader = _make_stamp_overlay(width, height, received_dt, stamp_text)
-        page.merge_page(overlay_reader.pages[0])
+    for index, page in enumerate(reader.pages):
+        if index == 0:
+            width = float(page.mediabox.width)
+            height = float(page.mediabox.height)
+            overlay_reader = _make_stamp_overlay(width, height, received_dt, stamp_text)
+            page.merge_page(overlay_reader.pages[0])
         writer.add_page(page)
 
     with open(output_pdf_path, "wb") as f:
