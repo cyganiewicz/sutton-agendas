@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import uuid
 
+from pypdf import PdfReader
+
 ALLOWED_EXTENSIONS = {".pdf", ".doc", ".docx"}
 
 
@@ -37,11 +39,24 @@ def convert_to_pdf(input_path: str, work_dir: str) -> str:
     if ext not in (".doc", ".docx"):
         raise ConversionError(f"Unsupported file type: {ext}")
 
-    # LibreOffice writes the output PDF into --outdir using the same base filename.
+    # LibreOffice keeps a single shared "user profile" (config, locks, etc.)
+    # per UserInstallation directory. Under real traffic this app can run
+    # more than one conversion at the same time (multiple gunicorn workers,
+    # or two people submitting at once), and if those concurrent `soffice`
+    # processes all point at the same default profile, they collide over its
+    # lock file -- the well-known symptom is that the conversion "succeeds"
+    # (exit code 0, a PDF file gets written) but the output is blank because
+    # the document never actually got loaded/rendered. Giving every
+    # conversion its own throwaway profile directory (inside this request's
+    # already-unique work_dir) avoids that collision entirely.
+    profile_dir = os.path.join(work_dir, "loffice_profile")
+    os.makedirs(profile_dir, exist_ok=True)
+
     cmd = [
         "soffice",
         "--headless",
         "--norestore",
+        f"-env:UserInstallation=file://{profile_dir}",
         "--convert-to",
         "pdf",
         "--outdir",
@@ -58,6 +73,11 @@ def convert_to_pdf(input_path: str, work_dir: str) -> str:
         )
     except subprocess.TimeoutExpired as e:
         raise ConversionError("Document conversion timed out.") from e
+    except OSError as e:
+        # Covers FileNotFoundError (soffice not installed/not on PATH) and
+        # other launch failures, so a broken environment produces a clear
+        # ConversionError instead of an unhandled exception.
+        raise ConversionError(f"Could not launch LibreOffice converter: {e}") from e
 
     if result.returncode != 0:
         raise ConversionError(
@@ -70,7 +90,34 @@ def convert_to_pdf(input_path: str, work_dir: str) -> str:
     if not os.path.exists(output_path):
         raise ConversionError("Conversion completed but no output PDF was found.")
 
+    _verify_not_blank(output_path)
+
     return output_path
+
+
+def _verify_not_blank(pdf_path: str) -> None:
+    """
+    LibreOffice can exit 0 and still write an empty-looking PDF if the
+    conversion silently failed (e.g. the profile-lock collision described
+    above, or a corrupt input file). Catch that here instead of silently
+    emailing a blank document to the Clerk's office.
+    """
+    try:
+        reader = PdfReader(pdf_path)
+        if len(reader.pages) == 0:
+            raise ConversionError("Conversion produced a PDF with no pages.")
+        text = "".join(page.extract_text() or "" for page in reader.pages).strip()
+    except ConversionError:
+        raise
+    except Exception as e:
+        raise ConversionError(f"Could not verify the converted PDF: {e}") from e
+
+    if not text:
+        raise ConversionError(
+            "The converted PDF appears to be blank. This can happen if the "
+            "server was converting another document at the same moment -- "
+            "please try submitting again."
+        )
 
 
 def make_temp_workdir() -> str:
